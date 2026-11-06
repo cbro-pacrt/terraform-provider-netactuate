@@ -73,7 +73,7 @@ func TestAccNetactuateServerTagsBaseline_apiReadReorderWhitespaceDuplicateAndImp
 				ResourceName:            "netactuate_server.test",
 				ImportState:             true,
 				ImportStateVerify:       true,
-				ImportStateVerifyIgnore: []string{"password", "allow_downsize_reboot", "package_billing", "params", "tags"},
+				ImportStateVerifyIgnore: []string{"password", "allow_downsize_reboot", "package_billing", "params", "tags", "build_job_id"},
 				Check:                   testAccCheckServerTagsAPI("netactuate_server.test", []string{tagA, tagB}),
 			},
 			{

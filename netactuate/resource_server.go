@@ -18,8 +18,11 @@ import (
 )
 
 const (
-	tries       = 200
+	tries       = 480
 	intervalSec = 1
+
+	jobStatusComplete = 5
+	jobStatusFailed   = 6
 )
 
 var (
@@ -175,6 +178,11 @@ func resourceServer() *schema.Resource {
 				Optional:    true,
 				Description: "Additional JSON formatted parameters to be passed to the server creation and management API",
 			},
+			"build_job_id": {
+				Type:        schema.TypeInt,
+				Computed:    true,
+				Description: "ID of the build job queued when Terraform created the server.",
+			},
 			"tags": {
 				Type:             schema.TypeString,
 				Optional:         true,
@@ -204,6 +212,11 @@ func resourceServer() *schema.Resource {
 				}
 				return nil
 			},
+			customdiff.ComputedIf("build_job_id", func(_ context.Context, d *schema.ResourceDiff, meta interface{}) bool {
+				return d.HasChange("location_id") || serverLocationPair.NameReallyChanged(d) ||
+					d.HasChange("image_id") || serverImagePair.NameReallyChanged(d) ||
+					d.HasChange("hostname") || d.HasChange("params")
+			}),
 			// "image"/"location" use CatalogRef.NameReallyChanged instead of a
 			// raw d.HasChange: CustomizeDiff runs before each field's own
 			// DiffSuppressFunc is applied, so a raw HasChange fires even on a
@@ -291,9 +304,16 @@ func resourceServerCreate(ctx context.Context, d *schema.ResourceData, m interfa
 
 	d.SetId(strconv.Itoa(s.ServerID))
 	d.Set("params", req.Params) // Store params in the state file
+	d.Set("build_job_id", s.Build)
+
+	if s.Build > 0 {
+		if jd := wait4JobStatus("build", s.Build, c); jd != nil {
+			return createWaitError(jd)
+		}
+	}
 
 	if _, diags := wait4Status(s.ServerID, "RUNNING", c); diags.HasError() {
-		return diags
+		return createWaitError(diags)
 	}
 
 	server, err := c.GetServer(s.ServerID)
@@ -353,6 +373,22 @@ func hydrateServerBillingFields(d *schema.ResourceData, server gona.Server, diag
 	setValue("package_billing_contract_id", contractID, d, diags)
 }
 
+func buildJobStatus(c *gona.Client, d *schema.ResourceData) (jobID, status int, known bool, err error) {
+	v, ok := d.GetOk("build_job_id")
+	if !ok {
+		return 0, 0, false, nil
+	}
+	jobID = v.(int)
+	job, err := c.GetJobStatus("build", jobID)
+	if err != nil {
+		if gona.IsNotFound(err) {
+			return jobID, 0, false, nil
+		}
+		return jobID, 0, false, err
+	}
+	return jobID, job.Status, true, nil
+}
+
 func resourceServerRead(ctx context.Context, d *schema.ResourceData, m interface{}) diag.Diagnostics {
 	c := m.(*ProviderClients).V2
 
@@ -364,8 +400,28 @@ func resourceServerRead(ctx context.Context, d *schema.ResourceData, m interface
 	server, err := c.GetServer(id)
 	if err != nil {
 		if gona.IsNotFound(err) {
+			// 422 means not registered yet or gone; the build job tells them apart.
+			jobID, status, known, jobErr := buildJobStatus(c, d)
+			if jobErr != nil {
+				return diag.FromErr(jobErr)
+			}
+			if known && status < jobStatusComplete {
+				log.Printf("[DEBUG] Server %d is not in the API yet; build job %d is in progress (status %d), keeping it in state", id, jobID, status)
+				return nil
+			}
+
+			reason := "no build job id in state"
+			switch {
+			case jobID != 0 && !known:
+				reason = fmt.Sprintf("build job %d record not found", jobID)
+			case known && status == jobStatusFailed:
+				reason = fmt.Sprintf("build job %d failed", jobID)
+			case known:
+				reason = fmt.Sprintf("build job %d finished with status %d", jobID, status)
+			}
 			// Deleted out of band. Drop it from state so a plan can recreate it,
 			// rather than erroring forever or hydrating zeros over real state.
+			log.Printf("[DEBUG] Removing server %d from state: not found in the API (%s)", id, reason)
 			d.SetId("")
 			return nil
 		}
@@ -374,12 +430,23 @@ func resourceServerRead(ctx context.Context, d *schema.ResourceData, m interface
 
 	var diags diag.Diagnostics
 
+	// The API reports hostname and image blank while building; keep ours so the plan doesn't rebuild.
+	building := false
 	if server.Installed == 0 {
-		setValue("hostname", "", d, &diags)
-		serverImagePair.Hydrate(d, 0, "", &diags)
-	} else {
-		setValue("hostname", server.Name, d, &diags)
-		serverImagePair.Hydrate(d, server.OSID, server.OS, &diags)
+		if jobID, status, known, jobErr := buildJobStatus(c, d); jobErr == nil && known && status < jobStatusComplete {
+			building = true
+			log.Printf("[DEBUG] Server %d is still building (build job %d, status %d), keeping hostname and image from state", id, jobID, status)
+		}
+	}
+
+	if !building {
+		if server.Installed == 0 {
+			setValue("hostname", "", d, &diags)
+			serverImagePair.Hydrate(d, 0, "", &diags)
+		} else {
+			setValue("hostname", server.Name, d, &diags)
+			serverImagePair.Hydrate(d, server.OSID, server.OS, &diags)
+		}
 	}
 	setValue("plan", server.Package, d, &diags)
 	serverLocationPair.Hydrate(d, server.LocationID, server.Location, &diags)
@@ -619,9 +686,16 @@ func resourceServerUpdate(ctx context.Context, d *schema.ResourceData, m interfa
 		}
 
 		// Rebuild server with potentially updated params
-		_, err = c.BuildServer(id, req)
+		build, err := c.BuildServer(id, req)
 		if err != nil {
 			return diag.FromErr(err)
+		}
+		d.Set("build_job_id", build.Build)
+
+		if build.Build > 0 {
+			if jd := wait4JobStatus("build", build.Build, c); jd != nil {
+				return jd
+			}
 		}
 
 		// Update the params in the state file if they were changed and server rebuilt
@@ -729,12 +803,11 @@ func wait4JobStatus(command string, jobID int, client *gona.Client) diag.Diagnos
 			return diag.FromErr(err)
 		}
 
-		if job.Status > 5 {
+		if job.Status > jobStatusComplete {
 			return diag.Errorf("Job %s #%d failed with status: %d", command, jobID, job.Status)
 		}
 
-		// 5 = completed
-		if job.Status == 5 {
+		if job.Status == jobStatusComplete {
 			return nil
 		}
 
@@ -742,6 +815,17 @@ func wait4JobStatus(command string, jobID int, client *gona.Client) diag.Diagnos
 	}
 
 	return diag.Errorf("timeout waiting for job %s #%d to complete", command, jobID)
+}
+
+func createWaitError(diags diag.Diagnostics) diag.Diagnostics {
+	const note = "The server was created but is marked tainted. If it completed in the portal, you can untaint and refresh."
+	for i := range diags {
+		if diags[i].Detail != "" {
+			diags[i].Detail += "\n\n"
+		}
+		diags[i].Detail += note
+	}
+	return diags
 }
 
 // getParams resolves the server's location and image config (whichever form

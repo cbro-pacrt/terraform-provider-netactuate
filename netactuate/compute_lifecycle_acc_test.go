@@ -39,7 +39,7 @@ func TestAccNetactuateServerLifecycle(t *testing.T) {
 		), resource.ComposeTestCheckFunc(
 			testAccTrackFromState("netactuate_server", "netactuate_server.test"),
 			testAccCheckComputeServerAPI("netactuate_server.test", name+"-u.e.invalid", plan, locationID, imageID),
-		), testAccLifecycleOptions{ImportStateVerifyIgnore: []string{"password", "allow_downsize_reboot", "package_billing", "params", "tags"}}),
+		), testAccLifecycleOptions{ImportStateVerifyIgnore: []string{"password", "allow_downsize_reboot", "package_billing", "params", "tags", "build_job_id"}}),
 	})
 }
 

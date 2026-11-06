@@ -50,6 +50,7 @@ resource "netactuate_server" "example" {
 
 ### Read-Only
 
+- `build_job_id` (Number) ID of the build job queued when Terraform created the server.
 - `id` (String) The ID of this resource.
 - `primary_ipv4` (String) Value returned by the NetActuate API for this field.
 - `primary_ipv6` (String) Value returned by the NetActuate API for this field.

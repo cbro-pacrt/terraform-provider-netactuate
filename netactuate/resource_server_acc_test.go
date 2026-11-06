@@ -52,7 +52,7 @@ func TestAccNetactuateServer_importWithVPCAndImageNamePlan(t *testing.T) {
 				ImportState:  true,
 				// E-01 failed before e2bd63f: an imported server with vpc_id set planned replacement.
 				ImportStateVerify:       true,
-				ImportStateVerifyIgnore: []string{"password", "allow_downsize_reboot", "package_billing", "params"},
+				ImportStateVerifyIgnore: []string{"password", "allow_downsize_reboot", "package_billing", "params", "build_job_id"},
 			},
 			{
 				Config:   configID,
