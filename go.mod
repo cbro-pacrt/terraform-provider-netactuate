@@ -65,3 +65,5 @@ require (
 	google.golang.org/grpc v1.79.3 // indirect
 	google.golang.org/protobuf v1.36.10 // indirect
 )
+
+replace github.com/netactuate/gona => github.com/cbro-pacrt/gona v0.0.0-20261110075743-849e4971f85c
